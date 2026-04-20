@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8">
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+body{background:#1a1a2e;font-family:Arial,sans-serif;overflow:hidden;user-select:none;}
+canvas{display:block;}
+#ui{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;}
+#menu{position:absolute;top:0;left:0;width:100%;height:100%;background:#1a1a2e;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;pointer-events:all;}
+#menu h1{color:#f5a623;font-size:36px;}
+#menu p{color:#aaa;font-size:13px;}
+.btn{background:#f5a623;color:#1a1a2e;border:none;padding:12px 32px;font-size:16px;font-weight:700;border-radius:8px;cursor:pointer;min-width:200px;transition:transform 0.1s;}
+.btn:hover{transform:scale(1.05);}.btn:active{transform:scale(0.97);}
+#hud{position:absolute;top:12px;left:0;width:100%;display:flex;justify-content:center;gap:40px;pointer-events:none;}
+.score-box{background:rgba(0,0,0,0.6);border-radius:10px;padding:8px 20px;text-align:center;border:1px solid rgba(255,255,255,0.1);}
+.score-box .name{color:#aaa;font-size:11px;text-transform:uppercase;letter-spacing:1px;}
+.score-box .pts{color:#fff;font-size:28px;font-weight:700;}
+#timer-box{background:rgba(0,0,0,0.6);border-radius:10px;padding:8px 20px;text-align:center;border:1px solid rgba(255,255,255,0.1);}
+#timer-box .label{color:#aaa;font-size:11px;text-transform:uppercase;letter-spacing:1px;}
+#timer-box .time{color:#f5a623;font-size:28px;font-weight:700;}
+#shot-clock{position:absolute;top:90px;left:50%;transform:translateX(-50%);background:rgba(200,50,50,0.85);color:#fff;padding:4px 16px;border-radius:6px;font-weight:700;font-size:14px;display:none;}
+#msg{position:absolute;top:45%;left:50%;transform:translate(-50%,-50%);color:#f5a623;font-size:38px;font-weight:700;text-align:center;pointer-events:none;opacity:0;transition:opacity 0.3s;text-shadow:0 2px 10px #0008;}
+#controls-hint{position:absolute;bottom:8px;left:0;width:100%;text-align:center;color:rgba(255,255,255,0.3);font-size:11px;pointer-events:none;}
+#game-over{position:absolute;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.82);display:none;flex-direction:column;align-items:center;justify-content:center;gap:16px;pointer-events:all;}
+#game-over h2{color:#f5a623;font-size:42px;}
+#game-over p{color:#fff;font-size:22px;}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <div id="menu">
+    <h1>🏀 1v1 Basketball</h1>
+    <p>First to 11 wins · Shot clock: 24s · Shift+Space/Enter to dunk!</p>
+    <button class="btn" onclick="startGame('solo')">Practice Mode</button>
+    <button class="btn" onclick="startGame('ai')">vs CPU</button>
+    <button class="btn" onclick="startGame('2p')">2 Players</button>
+    <p style="margin-top:8px;color:#555;font-size:12px;">P1: WASD + Space (shoot) · Shift+Space (dunk)<br>P2: Arrows + Enter (shoot) · Shift+Enter (dunk)</p>
+  </div>
+  <div id="hud" style="display:none;">
+    <div class="score-box"><div class="name" id="n1">Player 1</div><div class="pts" id="s1">0</div></div>
+    <div id="timer-box"><div class="label">Time</div><div class="time" id="timer">60</div></div>
+    <div class="score-box"><div class="name" id="n2">CPU</div><div class="pts" id="s2">0</div></div>
+  </div>
+  <div id="shot-clock">SHOT CLOCK: <span id="sc">24</span>s</div>
+  <div id="msg"></div>
+  <div id="controls-hint"></div>
+  <div id="game-over">
+    <h2>Game Over!</h2>
+    <p id="winner-text"></p>
+    <button class="btn" onclick="showMenu()">Main Menu</button>
+    <button class="btn" onclick="startGame(lastMode)">Play Again</button>
+  </div>
+</div>
+<script>
+const canvas=document.getElementById('c');
+const ctx=canvas.getContext('2d');
+let W,H;
+function resize(){W=canvas.width=window.innerWidth;H=canvas.height=window.innerHeight;}
+resize();window.addEventListener('resize',()=>{resize();if(gameActive)calcLayout();});
+
+let mode='',lastMode='',gameActive=false;
+let score=[0,0],gameTimer=60,shotClock=24;
+let gameInterval,msgTimeout;
+
+// Layout constants — recalculated on resize
+let GY,HOOP_L,HOOP_R,RIM_Y,RIM_W,RIM_H,BOARD_W,BOARD_H,NET_DROP;
+function calcLayout(){
+  GY=H*0.80;           // floor y
+  RIM_Y=GY-H*0.28;     // rim height
+  RIM_W=52;            // rim diameter (pixels)
+  RIM_H=6;
+  BOARD_W=10;
+  BOARD_H=70;
+  NET_DROP=38;
+  HOOP_L={x:W*0.12};  // left hoop center x (rim midpoint)
+  HOOP_R={x:W*0.88};  // right hoop center x
+}
+calcLayout();
+
+// Which hoop does each player attack?
+// P1 (idx 0) attacks RIGHT hoop, P2/CPU (idx 1) attacks LEFT hoop
+function attackHoop(pi){return pi===0?HOOP_R:HOOP_L;}
+function defendHoop(pi){return pi===0?HOOP_L:HOOP_R;}
+
+const GRAVITY=0.42,DRAG=0.989;
+const WIN_SCORE=11;
+const PLAYER_W=12,PLAYER_H=26;
+const DUNK_RANGE=48; // horizontal px from rim center to attempt dunk
+
+// AI state
+const AI={state:'defend',timer:0,shootTimer:0,targetX:0,power:0,dunkAttempt:false};
+
+let players,ball,possession,lastShooter;
+let charging1=false,power1=0,lastSpace=false,lastShift1=false;
+let charging2=false,power2=0,lastEnter=false,lastShift2=false;
+let dunkAnim=null; // {pi, t, startX, startY, targetX, targetY}
+
+const keys={};
+window.addEventListener('keydown',e=>{
+  keys[e.code]=true;
+  if(['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code))e.preventDefault();
+});
+window.addEventListener('keyup',e=>{keys[e.code]=false;});
+
+function groundY(){return GY;}
+
+function initGame(){
+  calcLayout();
+  players=[
+    {x:W*0.35,y:GY,vx:0,vy:0,color:'#3a86ff',name:'Player 1',w:PLAYER_W,h:PLAYER_H,onGround:true},
+    {x:W*0.65,y:GY,vx:0,vy:0,color:'#e74c3c',name:mode==='2p'?'Player 2':'CPU',w:PLAYER_W,h:PLAYER_H,onGround:true}
+  ];
+  ball={x:W*0.35,y:GY-30,vx:0,vy:0,r:10,spin:0,inFlight:false};
+  possession=0;lastShooter=0;
+  score=[0,0];shotClock=24;gameTimer=60;
+  charging1=false;power1=0;lastSpace=false;
+  charging2=false;power2=0;lastEnter=false;
+  dunkAnim=null;
+  AI.state='defend';AI.timer=0;AI.shootTimer=0;AI.power=0;AI.dunkAttempt=false;
+  updateHUD();
+}
+
+function snapBallToPlayer(pi){
+  if(pi<0)return;
+  const p=players[pi];
+  ball.x=p.x+(pi===0?14:-14);
+  ball.y=p.y-p.h*0.5;
+  ball.vx=0;ball.vy=0;ball.inFlight=false;
+  charging1=false;power1=0;
+  charging2=false;power2=0;
+  AI.power=0;AI.shootTimer=0;AI.dunkAttempt=false;
+  dunkAnim=null;
+}
+
+function startGame(m){
+  mode=m;lastMode=m;
+  document.getElementById('menu').style.display='none';
+  document.getElementById('game-over').style.display='none';
+  document.getElementById('hud').style.display='flex';
+  document.getElementById('n1').textContent='Player 1';
+  document.getElementById('n2').textContent=m==='2p'?'Player 2':'CPU';
+  document.getElementById('shot-clock').style.display='none';
+  initGame();gameActive=true;
+  clearInterval(gameInterval);
+  gameInterval=setInterval(tickTimers,1000);
+  document.getElementById('controls-hint').textContent=
+    m==='solo'?'WASD/Arrows to move · Space/Enter to shoot · Shift+Space/Enter to dunk':
+    m==='ai'?'WASD to move · Space to shoot · Shift+Space to dunk':
+    'P1: WASD+Space(+Shift=dunk)  |  P2: Arrows+Enter(+Shift=dunk)';
+  requestAnimationFrame(loop);
+}
+
+function tickTimers(){
+  if(!gameActive)return;
+  gameTimer=Math.max(0,gameTimer-1);
+  shotClock=Math.max(0,shotClock-1);
+  document.getElementById('sc').textContent=shotClock;
+  document.getElementById('timer').textContent=gameTimer;
+  if(shotClock<=5&&shotClock>0)document.getElementById('shot-clock').style.display='block';
+  if(shotClock===0)turnover();
+  if(gameTimer===0)endGame();
+}
+function resetShotClock(){shotClock=24;document.getElementById('sc').textContent=24;document.getElementById('shot-clock').style.display='none';}
+function turnover(){showMsg('Shot Clock!');possession=1-possession;resetShotClock();snapBallToPlayer(possession);}
+function showMsg(txt,dur=1500){const el=document.getElementById('msg');el.textContent=txt;el.style.opacity=1;clearTimeout(msgTimeout);msgTimeout=setTimeout(()=>el.style.opacity=0,dur);}
+function updateHUD(){document.getElementById('s1').textContent=score[0];document.getElementById('s2').textContent=score[1];}
+
+function scored(pi,pts,label){
+  score[pi]+=pts;updateHUD();
+  showMsg(label||(pts===3?'Three! +3':pts===2?'Basket! +2':'Dunk! +2'));
+  resetShotClock();
+  possession=1-pi;lastShooter=pi;ball.inFlight=false;dunkAnim=null;
+  if(score[pi]>=WIN_SCORE){gameActive=false;setTimeout(endGame,900);return;}
+  setTimeout(()=>snapBallToPlayer(possession),700);
+}
+
+function endGame(){
+  gameActive=false;clearInterval(gameInterval);
+  document.getElementById('game-over').style.display='flex';
+  let w='Tie game!';
+  if(score[0]>score[1])w='Player 1 wins!';
+  else if(score[1]>score[0])w=(mode==='ai'?'CPU wins!':'Player 2 wins!');
+  document.getElementById('winner-text').textContent=`Final: ${score[0]} - ${score[1]}  ·  ${w}`;
+}
+function showMenu(){document.getElementById('game-over').style.display='none';document.getElementById('hud').style.display='none';document.getElementById('menu').style.display='flex';gameActive=false;clearInterval(gameInterval);}
+
+// ── Player physics ──
+function movePlayer(p,left,right,doJump){
+  if(left)p.vx-=0.9;
+  if(right)p.vx+=0.9;
+  p.vx*=0.76;p.vy+=GRAVITY;
+  if(doJump&&p.onGround){p.vy=-11;p.onGround=false;}
+  p.x+=p.vx;p.y+=p.vy;
+  if(p.y>=GY){p.y=GY;p.vy=0;p.onGround=true;}else p.onGround=false;
+  p.x=Math.max(p.w,Math.min(W-p.w,p.x));
+}
+
+// ── Shooting ──
+function launchBall(pi,power){
+  if(ball.inFlight||possession!==pi||dunkAnim)return;
+  const hp=attackHoop(pi);
+  const p=players[pi];
+  const dist=Math.hypot(p.x-hp.x,p.y-GY);
+  const err=dist*0.16*(1-power*0.65);
+  const ox=(Math.random()-0.5)*err*2,oy=(Math.random()-0.5)*err;
+  const tx=hp.x+ox,ty=RIM_Y+oy;
+  const t=20+dist*0.042;
+  ball.vx=(tx-p.x)/t;
+  ball.vy=(ty-p.y)/t-0.5*GRAVITY*t;
+  ball.inFlight=true;lastShooter=pi;possession=-1;
+}
+
+// ── Dunk ──
+function tryDunk(pi){
+  if(ball.inFlight||possession!==pi||dunkAnim)return;
+  const hp=attackHoop(pi);
+  const p=players[pi];
+  const hDist=Math.abs(p.x-hp.x);
+  if(hDist>DUNK_RANGE*2)return false; // too far
+  // launch player + ball in an arc toward rim
+  dunkAnim={pi,t:0,dur:32,
+    startX:p.x,startY:p.y,
+    targetX:hp.x+(pi===0?-4:4),targetY:RIM_Y-p.h*0.5};
+  possession=-1;ball.inFlight=false;
+  return true;
+}
+
+function updateDunk(){
+  if(!dunkAnim)return;
+  const d=dunkAnim;
+  d.t++;
+  const frac=d.t/d.dur;
+  const ease=frac<0.5?2*frac*frac:1-Math.pow(-2*frac+2,2)/2;
+  const arcY=Math.sin(frac*Math.PI)*-55;
+  const p=players[d.pi];
+  p.x=d.startX+(d.targetX-d.startX)*ease;
+  p.y=d.startY+(d.targetY-d.startY)*ease+arcY;
+  ball.x=p.x+(d.pi===0?8:-8);
+  ball.y=p.y-p.h*0.3;
+  if(d.t>=d.dur){
+    scored(d.pi,2,'DUNK! +2');
+    p.y=GY;p.vy=0;p.onGround=true;
+  }
+}
+
+// ── AI ──
+function updateAI(){
+  const ai=players[1];
+  const p1=players[0];
+  const hp=attackHoop(1); // left hoop
+  AI.timer--;
+
+  if(possession===1){
+    const dist=Math.hypot(ai.x-hp.x,ai.y-GY);
+    // check dunk opportunity
+    if(Math.abs(ai.x-hp.x)<DUNK_RANGE&&ai.onGround&&Math.random()<0.03){
+      if(tryDunk(1)){return;}
+    }
+    if(AI.state!=='position'&&AI.state!=='shoot'){
+      AI.state='position';
+      const side=Math.random()<0.5?-1:1;
+      AI.targetX=hp.x+side*(30+Math.random()*100);
+      AI.timer=100;
+    }
+    if(AI.state==='position'){
+      const dx=AI.targetX-ai.x;
+      if(Math.abs(dx)>10)ai.vx+=Math.sign(dx)*2.0;
+      if(ai.onGround&&Math.random()<0.006)ai.vy=-9;
+      if((Math.abs(dx)<35&&dist<W*0.4)||AI.timer<=0){
+        AI.state='shoot';AI.shootTimer=18+Math.floor(Math.random()*22);AI.power=0;
+      }
+    }
+    if(AI.state==='shoot'){
+      AI.shootTimer--;AI.power=Math.min(1,AI.power+0.045);
+      if(AI.shootTimer===7&&ai.onGround)ai.vy=-7;
+      if(AI.shootTimer<=0){launchBall(1,AI.power);AI.state='defend';AI.power=0;}
+    }
+  } else {
+    AI.state='defend';
+    const tx=ball.inFlight?ball.x:p1.x;
+    const dx=tx-ai.x;
+    if(Math.abs(dx)>18)ai.vx+=Math.sign(dx)*1.6;
+    if(!ball.inFlight&&possession===0){
+      if(Math.hypot(ai.x-ball.x,ai.y-ball.y)<36){
+        possession=1;resetShotClock();showMsg('Steal!');snapBallToPlayer(1);
+        AI.state='position';AI.timer=60;
+        AI.targetX=hp.x+(Math.random()<0.5?-1:1)*(30+Math.random()*90);
+        return;
+      }
+    }
+  }
+  ai.vx*=0.76;ai.vy+=GRAVITY;ai.x+=ai.vx;ai.y+=ai.vy;
+  if(ai.y>=GY){ai.y=GY;ai.vy=0;ai.onGround=true;}else ai.onGround=false;
+  ai.x=Math.max(ai.w,Math.min(W-ai.w,ai.x));
+}
+
+// ── Ball physics ──
+function updateBall(){
+  if(dunkAnim){updateDunk();return;}
+  if(!ball.inFlight){
+    if(possession>=0){const p=players[possession];ball.x=p.x+(possession===0?14:-14);ball.y=p.y-p.h*0.5;}
+    return;
+  }
+  ball.vx*=DRAG;ball.vy+=GRAVITY;
+  ball.x+=ball.vx;ball.y+=ball.vy;
+  ball.spin+=ball.vx*0.13;
+  if(ball.x<ball.r){ball.x=ball.r;ball.vx*=-0.5;}
+  if(ball.x>W-ball.r){ball.x=W-ball.r;ball.vx*=-0.5;}
+
+  // check both hoops for scoring
+  for(let pi=0;pi<2;pi++){
+    const hp=attackHoop(pi);
+    const dx=ball.x-hp.x,dy=ball.y-RIM_Y;
+    if(Math.abs(dx)<RIM_W*0.45&&ball.vy>0&&Math.abs(dy)<10&&lastShooter===pi){
+      const dist=Math.hypot(players[pi].x-hp.x,players[pi].y-GY);
+      scored(pi,dist>W*0.3?3:2);return;
+    }
+    // rim bounce
+    if(Math.abs(dx)<RIM_W*0.5+ball.r&&Math.abs(dy)<10){ball.vy*=-0.4;ball.vx*=0.5;}
+    // backboard bounce
+    const bbX=pi===0?HOOP_R.x+RIM_W*0.5+BOARD_W:HOOP_L.x-RIM_W*0.5-BOARD_W;
+    if(Math.abs(ball.x-bbX)<ball.r+BOARD_W&&ball.y>RIM_Y-BOARD_H&&ball.y<RIM_Y+10){ball.vx*=-0.55;}
+  }
+
+  // floor
+  const gy=GY-ball.r;
+  if(ball.y>=gy){
+    ball.y=gy;
+    if(Math.abs(ball.vy)>1.8){ball.vy*=-0.4;ball.vx*=0.6;}
+    else{
+      ball.inFlight=false;
+      const d0=Math.hypot(players[0].x-ball.x,players[0].y-ball.y);
+      const d1=Math.hypot(players[1].x-ball.x,players[1].y-ball.y);
+      possession=d0<d1?0:1;resetShotClock();snapBallToPlayer(possession);
+    }
+  }
+  // player catches/steals
+  for(let i=0;i<2;i++){
+    const p=players[i];
+    if(Math.hypot(p.x-ball.x,p.y-p.h*0.5-ball.y)<p.w+ball.r+4&&possession!==i&&lastShooter!==i){
+      possession=i;ball.inFlight=false;resetShotClock();snapBallToPlayer(i);showMsg(i===1?'CPU Rebound!':'Rebound!');break;
+    }
+  }
+}
+
+// ── Input ──
+function handleInputs(){
+  const shift=keys['ShiftLeft']||keys['ShiftRight'];
+  const sp=keys['Space'];
+  const en=keys['Enter'];
+
+  if(mode==='ai'||mode==='2p'||mode==='solo'){
+    movePlayer(players[0],keys['KeyA'],keys['KeyD'],(keys['KeyW'])&&players[0].onGround);
+    if(possession===0&&!dunkAnim){
+      // dunk: shift+space on fresh press
+      if(shift&&sp&&!lastSpace){if(!tryDunk(0)){launchBall(0,0.9);}}
+      else{
+        if(sp&&!lastSpace){charging1=true;}
+        if(charging1)power1=Math.min(1,power1+0.03);
+        if(!sp&&lastSpace&&charging1){launchBall(0,power1);charging1=false;power1=0;}
+      }
+    } else {charging1=false;power1=0;}
+    lastSpace=sp;
+  }
+
+  if(mode==='2p'||mode==='solo'){
+    movePlayer(players[1],keys['ArrowLeft'],keys['ArrowRight'],keys['ArrowUp']&&players[1].onGround);
+    if(possession===1&&!dunkAnim){
+      if(shift&&en&&!lastEnter){if(!tryDunk(1)){launchBall(1,0.9);}}
+      else{
+        if(en&&!lastEnter){charging2=true;}
+        if(charging2)power2=Math.min(1,power2+0.03);
+        if(!en&&lastEnter&&charging2){launchBall(1,power2);charging2=false;power2=0;}
+      }
+    } else {charging2=false;power2=0;}
+    lastEnter=en;
+  }
+
+  if(mode==='ai')updateAI();
+}
+
+// ── Drawing ──
+function drawCourt(){
+  // Background/stands
+  ctx.fillStyle='#0d0a18';ctx.fillRect(0,0,W,H);
+  // Floor
+  ctx.fillStyle='#c17f3a';ctx.fillRect(0,GY,W,H-GY);
+  // Floor wood lines
+  ctx.strokeStyle='rgba(160,100,30,0.4)';ctx.lineWidth=1;
+  for(let x=0;x<W;x+=32){ctx.beginPath();ctx.moveTo(x,GY);ctx.lineTo(x,H);ctx.stroke();}
+  // Court lines
+  ctx.strokeStyle='rgba(255,255,255,0.6)';ctx.lineWidth=2;
+  ctx.beginPath();ctx.moveTo(0,GY);ctx.lineTo(W,GY);ctx.stroke();
+  // Center line
+  ctx.beginPath();ctx.moveTo(W/2,GY);ctx.lineTo(W/2,GY-30);ctx.stroke();
+  // Center circle
+  ctx.beginPath();ctx.arc(W/2,GY,55,Math.PI,2*Math.PI);ctx.stroke();
+  // Paint (left & right keys)
+  const keyW=Math.min(W*0.18,110),keyH=GY-RIM_Y+NET_DROP+20;
+  ctx.strokeStyle='rgba(255,255,255,0.45)';
+  ctx.strokeRect(0,GY-keyH,keyW,keyH);
+  ctx.strokeRect(W-keyW,GY-keyH,keyW,keyH);
+  // Free throw circles
+  ctx.beginPath();ctx.arc(keyW,GY-keyH,keyW*0.55,Math.PI*1.5,Math.PI*0.5);ctx.stroke();
+  ctx.beginPath();ctx.arc(W-keyW,GY-keyH,keyW*0.55,Math.PI*0.5,Math.PI*1.5);ctx.stroke();
+  // 3-point arcs (from each baseline, centered on hoop)
+  ctx.strokeStyle='rgba(255,255,255,0.4)';ctx.setLineDash([8,8]);
+  const r3=Math.min(W*0.32,200);
+  ctx.beginPath();ctx.arc(HOOP_L.x,GY,r3,Math.PI*1.5,Math.PI*0.5);ctx.stroke();
+  ctx.beginPath();ctx.arc(HOOP_R.x,GY,r3,Math.PI*0.5,Math.PI*1.5);ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function drawHoop(hx,facingRight){
+  // facingRight: left hoop faces right, right hoop faces left
+  const bx=facingRight?hx+RIM_W*0.5:hx-RIM_W*0.5;
+  // Pole from floor to near backboard
+  ctx.fillStyle='#555';
+  const poleX=facingRight?bx+BOARD_W:bx-BOARD_W;
+  ctx.fillRect(poleX-(facingRight?0:6),GY-4,6,-(GY-(RIM_Y-BOARD_H*0.1)));
+
+  // Backboard
+  ctx.fillStyle='rgba(200,220,255,0.18)';
+  ctx.strokeStyle='#bbb';ctx.lineWidth=3;
+  const bbX=facingRight?bx:bx-BOARD_W;
+  ctx.fillRect(bbX,RIM_Y-BOARD_H,BOARD_W,BOARD_H);
+  ctx.strokeRect(bbX,RIM_Y-BOARD_H,BOARD_W,BOARD_H);
+  // Inner square on backboard
+  ctx.strokeStyle='rgba(220,50,50,0.8)';ctx.lineWidth=1.5;
+  ctx.strokeRect(bbX+1,RIM_Y-BOARD_H*0.45,BOARD_W-2,BOARD_H*0.32);
+
+  // Arm connecting backboard to rim
+  ctx.strokeStyle='#888';ctx.lineWidth=4;
+  ctx.beginPath();
+  ctx.moveTo(facingRight?bbX:bbX+BOARD_W,RIM_Y+RIM_H/2);
+  ctx.lineTo(hx+(facingRight?-RIM_W*0.5:RIM_W*0.5),RIM_Y+RIM_H/2);
+  ctx.stroke();
+
+  // Rim (front orange bar)
+  const rimColor='#e06020';
+  ctx.fillStyle=rimColor;
+  ctx.beginPath();ctx.roundRect(hx-RIM_W*0.5,RIM_Y,RIM_W,RIM_H,3);ctx.fill();
+  // Rim depth (3D effect)
+  ctx.fillStyle='#a04010';
+  ctx.beginPath();ctx.roundRect(hx-RIM_W*0.5,RIM_Y+RIM_H,RIM_W,4,2);ctx.fill();
+
+  // Net
+  const nx=hx, ny=RIM_Y+RIM_H;
+  const nw=RIM_W*0.5, nd=NET_DROP;
+  ctx.strokeStyle='rgba(230,230,230,0.75)';ctx.lineWidth=1;
+  // Vertical strings
+  const strings=6;
+  for(let i=0;i<=strings;i++){
+    const t=i/strings;
+    const topX=nx-nw+t*nw*2;
+    const botX=nx-nw*0.35+t*nw*0.7;
+    ctx.beginPath();ctx.moveTo(topX,ny);ctx.lineTo(botX,ny+nd);ctx.stroke();
+  }
+  // Horizontal strings
+  for(let j=1;j<=3;j++){
+    const t=j/4;
+    const curW=nw*(1-t*0.4);
+    ctx.beginPath();ctx.moveTo(nx-curW,ny+nd*t);ctx.lineTo(nx+curW,ny+nd*t);ctx.stroke();
+  }
+  ctx.beginPath();ctx.moveTo(nx-nw*0.35,ny+nd);ctx.lineTo(nx+nw*0.35,ny+nd);ctx.stroke();
+}
+
+function drawPlayer(p,idx){
+  const pw=idx===0?(charging1?power1:0):(mode!=='ai'&&charging2?power2:0);
+  const isDunking=dunkAnim&&dunkAnim.pi===idx;
+  // shadow
+  ctx.fillStyle='rgba(0,0,0,0.18)';
+  ctx.beginPath();ctx.ellipse(p.x,GY+2,14,4,0,0,Math.PI*2);ctx.fill();
+  // legs
+  ctx.fillStyle=p.color==='#3a86ff'?'#1a5ab8':'#8b1a1a';
+  const legY=p.y;
+  if(isDunking){
+    // arms up dunk pose
+    ctx.fillRect(p.x-p.w,legY-p.h*0.5,p.w*0.9,p.h*0.5);
+    ctx.fillRect(p.x+1,legY-p.h*0.5,p.w*0.9,p.h*0.5);
+  } else {
+    ctx.fillRect(p.x-p.w,legY-p.h*0.5,p.w*0.9,p.h*0.5);
+    ctx.fillRect(p.x+1,legY-p.h*0.5,p.w*0.9,p.h*0.5);
+  }
+  // body
+  ctx.fillStyle=p.color;
+  ctx.fillRect(p.x-p.w,p.y-p.h,p.w*2,p.h*0.6);
+  // jersey number
+  ctx.fillStyle='rgba(255,255,255,0.7)';ctx.font='bold 9px Arial';ctx.textAlign='center';
+  ctx.fillText(idx===0?'1':'2',p.x,p.y-p.h*0.55);
+  // arms
+  ctx.strokeStyle=p.color;ctx.lineWidth=6;ctx.lineCap='round';
+  if(isDunking){
+    ctx.beginPath();ctx.moveTo(p.x-p.w,p.y-p.h*0.8);ctx.lineTo(p.x-p.w-8,p.y-p.h*1.35);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(p.x+p.w,p.y-p.h*0.8);ctx.lineTo(p.x+p.w+8,p.y-p.h*1.35);ctx.stroke();
+  } else {
+    ctx.beginPath();ctx.moveTo(p.x-p.w,p.y-p.h*0.8);ctx.lineTo(p.x-p.w-10,p.y-p.h*0.5);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(p.x+p.w,p.y-p.h*0.8);ctx.lineTo(p.x+p.w+10,p.y-p.h*0.5);ctx.stroke();
+  }
+  // head
+  ctx.fillStyle=p.color==='#3a86ff'?'#f5c5a3':'#f5c5a3';
+  ctx.beginPath();ctx.arc(p.x,p.y-p.h-9,11,0,Math.PI*2);ctx.fill();
+  // eyes
+  ctx.fillStyle='#333';
+  ctx.beginPath();ctx.arc(p.x-4,p.y-p.h-10,2,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.arc(p.x+4,p.y-p.h-10,2,0,Math.PI*2);ctx.fill();
+  // headband
+  ctx.strokeStyle=p.color==='#3a86ff'?'#ff4444':'#4444ff';ctx.lineWidth=3;
+  ctx.beginPath();ctx.arc(p.x,p.y-p.h-9,11,Math.PI*1.15,Math.PI*1.85);ctx.stroke();
+  // possession triangle
+  if(possession===idx&&!ball.inFlight&&!dunkAnim){
+    ctx.fillStyle='rgba(255,255,100,0.9)';ctx.font='bold 13px Arial';ctx.textAlign='center';
+    ctx.fillText('▲',p.x,p.y-p.h-26);
+  }
+  // power bar
+  if(pw>0){
+    ctx.fillStyle='rgba(0,0,0,0.5)';ctx.fillRect(p.x-22,p.y-p.h-38,44,7);
+    ctx.fillStyle=pw>0.7?'#e74c3c':'#f5a623';ctx.fillRect(p.x-22,p.y-p.h-38,44*pw,7);
+  }
+  if(idx===1&&mode==='ai'){
+    ctx.fillStyle='rgba(255,255,255,0.35)';ctx.font='9px Arial';ctx.textAlign='center';
+    ctx.fillText('CPU',p.x,p.y-p.h-28);
+  }
+}
+
+function drawBall(){
+  ctx.save();
+  ctx.translate(ball.x,ball.y);ctx.rotate(ball.spin);
+  ctx.fillStyle='#f5a623';
+  ctx.beginPath();ctx.arc(0,0,ball.r,0,Math.PI*2);ctx.fill();
+  ctx.strokeStyle='#7a3310';ctx.lineWidth=1.5;
+  ctx.beginPath();ctx.moveTo(-ball.r,0);ctx.lineTo(ball.r,0);ctx.stroke();
+  ctx.beginPath();ctx.arc(0,0,ball.r,0,Math.PI);ctx.stroke();
+  ctx.beginPath();ctx.arc(0,0,ball.r,0,Math.PI,true);ctx.stroke();
+  ctx.restore();
+  // floor shadow
+  ctx.fillStyle='rgba(0,0,0,0.12)';
+  const sh=Math.max(0,1-(ball.y-ball.r-GY+60)/180);
+  ctx.beginPath();ctx.ellipse(ball.x,GY+3,ball.r*1.2*sh,ball.r*0.3*sh,0,0,Math.PI*2);ctx.fill();
+}
+
+// dunk range indicators
+function drawDunkZones(){
+  if(!gameActive)return;
+  for(let pi=0;pi<2;pi++){
+    if(possession!==pi)continue;
+    const hp=attackHoop(pi);
+    const p=players[pi];
+    if(Math.abs(p.x-hp.x)<DUNK_RANGE*2.5&&p.y>GY-60){
+      ctx.fillStyle='rgba(255,200,0,0.06)';
+      ctx.fillRect(hp.x-DUNK_RANGE,RIM_Y,DUNK_RANGE*2,GY-RIM_Y);
+    }
+  }
+}
+
+function loop(){
+  if(!gameActive)return;
+  requestAnimationFrame(loop);
+  handleInputs();
+  updateBall();
+  ctx.clearRect(0,0,W,H);
+  drawCourt();
+  drawDunkZones();
+  // Draw hoops behind players
+  drawHoop(HOOP_L.x,true);   // left hoop, arm points right
+  drawHoop(HOOP_R.x,false);  // right hoop, arm points left
+  drawPlayer(players[0],0);
+  drawPlayer(players[1],1);
+  drawBall();
+}
+</script>
+</body></html>
